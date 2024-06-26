@@ -1,0 +1,160 @@
+import sys
+
+# Add the directory containing FBCSP_V4.py to the Python path
+fbcsp_path = r'C:\Users\a5149314\Downloads\FBCSP'
+sys.path.append(fbcsp_path)
+
+# Now you should be able to import FBCSP_V4 directly from the file
+from FBCSP_V4 import FBCSP_V4 as FBCSP
+import mne
+from scipy.io import loadmat
+import scipy
+import sklearn
+import numpy as np
+import pandas as pd
+import glob
+from mne.decoding import CSP
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import LinearSVC, SVC
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedShuffleSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import warnings
+
+warnings.filterwarnings('ignore')  # to ignore warnings
+verbose = False                    # global variable to suppress output display of MNE functions
+mne.set_log_level(verbose=verbose) # to suppress large info output
+verbose_clf = False # control output of FBCSP function
+freqs_band = np.linspace(8, 32, 7) # filter bank choice
+train_ratio = 0.75 # 75:25 for train-valid split
+n_jobs = None  # for multicore parallel processing, set it to 1 if necessary
+# using kappa as evaluation metric
+kappa = sklearn.metrics.make_scorer(sklearn.metrics.cohen_kappa_score) # kappa scorer
+acc = sklearn.metrics.make_scorer(sklearn.metrics.accuracy_score)      # accuracy scorer
+scorer = kappa          # just assign another scorer to replace kappa if needed
+data_path = r"C:\Users\a5149314\OneDrive - Renesas Electronics Corporation\Desktop\Sahana_MP\Clinical-Brain-Computer-Interfaces-Challenge-WCCI-2020-Glasgow-master"
+training_files = glob.glob(data_path + '/*T.mat')
+
+def get_mne_epochs(filepath, verbose=verbose, t_start=2, fs=512, mode='train'):
+    '''
+    This function reads the EEG data from .mat file and convert it to MNE-Python Compatible epochs
+    data structure. It takes data from [0, 8] sec range and return it by setting t = 0 at cue onset
+    i.e. 3 seconds and dropping first two seconds so the output data is in [-1.0, 5.0] sec range. The
+    Details can be found in the preprocessing section of the attached document
+    '''
+    mat_data = loadmat(filepath) # read .mat file
+    eeg_data = mat_data['RawEEGData']
+    idx_start = fs*t_start      
+    eeg_data = eeg_data[:, :, idx_start:]
+    event_id = {'left-hand': 1, 'right-hand': 2}
+    channel_names = ['F3', 'FC3', 'C3', 'CP3', 'P3', 'FCz', 'CPz', 'F4', 'FC4', 'C4', 'CP4', 'P4']
+    info = mne.create_info(ch_names=channel_names, sfreq=fs, ch_types='eeg')
+    epochs = mne.EpochsArray(eeg_data, info, verbose=verbose, tmin=t_start-3.0)
+    epochs.set_montage('standard_1020')
+    epochs.filter(1., None) 
+    epochs.apply_baseline(baseline=(-.250, 0)) # linear baseline correction
+    
+    if mode == 'train': # this in only applicable for training data
+        epochs.event_id = event_id
+        epochs.events[:,2] = mat_data['Labels'].ravel()    
+    return epochs 
+
+def get_labels(filepath):
+    mat_data = loadmat(filepath) # read .mat file
+    return mat_data['Labels'].ravel()
+
+epochs, labels = get_mne_epochs(training_files[0], verbose=verbose), get_labels(training_files[0])
+data = epochs.get_data()
+
+# Correct the number of subjects to match the number of files
+group_list = []
+for subject in range(1, 11):  # Assuming there are 10 files
+    group_list.extend([subject for _ in range(80)])  # 80 samples in each training file
+groups = np.array(group_list)
+
+# loading original data
+epochs_list_train = []
+for i in training_files:
+    epochs_list_train.append(get_mne_epochs(i, verbose=verbose))
+for epoch in epochs_list_train:
+    epoch.filter(7.0, 32.0)
+
+epochs = epochs_list_train[0]
+data, labels = epochs.get_data(), epochs.events[:,-1]
+data_dict = {'left-hand':  epochs['left-hand'].get_data()[:,:,256+512:-256], # [0.5, 4.5] sec data
+             'right-hand': epochs['right-hand'].get_data()[:,:,256+512:-256]}
+fs = epochs.info['sfreq']
+
+valid_scores_lda = []
+valid_scores_svc = []
+
+fbcsp_clf_lda = FBCSP(data_dict, fs, freqs_band=freqs_band, classifier=LinearDiscriminantAnalysis())
+preds_fbcsp_clf_lda = fbcsp_clf_lda.evaluateTrial(data)[0]
+valid_scores_lda.append(accuracy_score(preds_fbcsp_clf_lda, labels))
+
+fbcsp_clf_svc = FBCSP(data_dict, fs, freqs_band=freqs_band, classifier=SVC(probability=True))
+preds_fbcsp_clf_svc = fbcsp_clf_svc.evaluateTrial(data)[0]
+valid_scores_svc.append(accuracy_score(preds_fbcsp_clf_svc, labels))
+
+def training_function(subject_index=0):
+    # Load epochs data for the current subject
+    epochs = epochs_list_train[subject_index]
+    data_dict = {'left-hand': epochs['left-hand'].get_data()[:, :, 256+512:-256],  # [0.5, 4.5] sec data
+                 'right-hand': epochs['right-hand'].get_data()[:, :, 256+512:-256]}
+    fs = epochs.info['sfreq']
+    labels = epochs.events[:, -1]
+    
+    # Initialize FBCSP classifier for LDA
+    preds_fbcsp_clf_lda = fbcsp_clf_lda.evaluateTrial(data)[0]
+    valid_scores_lda.append(cohen_kappa_score(preds_fbcsp_clf_lda, labels))
+
+# Call the function with the classifiers as arguments
+for subject in range(len(training_files)):
+    training_function(subject)
+
+def generate_control_signal(preds_fbcsp_clf_lda):
+    control_signals = []
+    for label in preds_fbcsp_clf_lda:
+        if label == '2':
+            control_signals.append("Right hand grip")
+        elif label == '1':
+            control_signals.append("Left hand grip")
+    return control_signals
+
+# Generate control signals
+control_signals = generate_control_signal(preds_fbcsp_clf_lda)
+
+import serial
+import time
+
+# Define the serial port and baud rate
+serial_port = 'COM10'  # Adjust the port as per your system (e.g., 'COM10' for Windows)
+baud_rate = 9600
+
+# Function to establish connection and send data via UART
+def send_data_via_uart(label):
+    try:
+        # Open serial port
+        ser = serial.Serial(serial_port, baud_rate)
+
+        # Send data (classified label) via UART
+        if label == 2:
+            ser.write(b'Right hand grip\n')  # Send 'Right hand grip' for label indicating right-hand movement
+            time.sleep(10)  # Delay after sending 'R' signal
+
+        elif label == 1:
+            ser.write(b'Left hand grip\n')   # Send 'Left hand grip' for label indicating left-hand movement
+            time.sleep(10)  # Delay after sending 'L' signal
+
+        # Close serial port
+        ser.close()
+
+    except serial.SerialException as e:
+        print("Serial port error:", e)
+
+# Send control signals based on predicted labels
+for label in preds_fbcsp_clf_lda:
+    send_data_via_uart(label)
+    time.sleep(1)  # Add a delay between sending each label
