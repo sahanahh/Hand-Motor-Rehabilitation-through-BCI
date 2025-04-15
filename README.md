@@ -24,7 +24,7 @@ Addressing Motor Function Decline in Stroke Survivors: Stroke patients often exp
 Limitations of Traditional Rehabilitation: Conventional rehabilitation approaches are often broad and may not adequately treat the underlying mechanisms affecting motor deterioration, requiring innovative solutions like BCI technology for effective rehabilitation.
 
 ### Repository Structure
-* code/: Contains the source code for the project.
+* code_model/: Contains the source code for the project.
 * data/: Includes datasets used for training and testing.
 * docs/: Documentation and user manuals.
 * results/: Results and analysis of the experiments.
